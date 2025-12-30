@@ -7,8 +7,11 @@ import (
 
 	"github.com/go-i2p/go-i2p/pkg/crypto"
 	"github.com/go-i2p/go-i2p/pkg/data"
+	"github.com/go-i2p/go-i2p/pkg/debug"
 	"github.com/go-i2p/go-i2p/pkg/i2np"
 )
+
+var log = debug.NewLogger(debug.SubNTCP2)
 
 // Server manages NTCP2 connections.
 type Server struct {
@@ -59,17 +62,22 @@ func NewServer(config *ServerConfig) *Server {
 
 // Start starts the NTCP2 server.
 func (s *Server) Start() error {
+	defer log.FuncEntry()()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.running {
+		log.Debug("server already running")
 		return nil
 	}
 
 	// Start IPv4 listener
 	if s.localAddr != "" {
+		log.Info("starting IPv4 listener on %s", s.localAddr)
 		listener, err := net.Listen("tcp", s.localAddr)
 		if err != nil {
+			log.Error("failed to start IPv4 listener: %v", err)
 			return err
 		}
 		s.listener = listener
@@ -78,8 +86,10 @@ func (s *Server) Start() error {
 
 	// Start IPv6 listener
 	if s.localAddrV6 != "" {
+		log.Info("starting IPv6 listener on %s", s.localAddrV6)
 		listener, err := net.Listen("tcp6", s.localAddrV6)
 		if err != nil {
+			log.Error("failed to start IPv6 listener: %v", err)
 			if s.listener != nil {
 				s.listener.Close()
 			}
@@ -90,6 +100,7 @@ func (s *Server) Start() error {
 	}
 
 	s.running = true
+	log.Info("NTCP2 server started")
 
 	// Start termination checker
 	go s.terminationChecker()
@@ -99,9 +110,12 @@ func (s *Server) Start() error {
 
 // Stop stops the NTCP2 server.
 func (s *Server) Stop() {
+	defer log.FuncEntry()()
+
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
+		log.Debug("server not running")
 		return
 	}
 	s.running = false
@@ -124,9 +138,11 @@ func (s *Server) Stop() {
 	}
 	s.mu.RUnlock()
 
+	log.Info("terminating %d sessions", len(sessions))
 	for _, session := range sessions {
 		session.Terminate(TermRouterShutdown)
 	}
+	log.Info("NTCP2 server stopped")
 }
 
 // acceptLoop accepts incoming connections.
@@ -155,11 +171,13 @@ func (s *Server) acceptLoop(listener net.Listener) {
 // handleInbound handles an incoming connection.
 func (s *Server) handleInbound(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
+	log.Debug("inbound connection from %s", remoteAddr)
 
 	// Check for pending connection from same address
 	s.mu.Lock()
 	if _, exists := s.pendingConns[remoteAddr]; exists {
 		s.mu.Unlock()
+		log.Warn("duplicate pending connection from %s, rejecting", remoteAddr)
 		conn.Close()
 		return
 	}
@@ -179,7 +197,9 @@ func (s *Server) handleInbound(conn net.Conn) {
 	s.mu.Unlock()
 
 	// Perform handshake
+	log.Trace("performing inbound handshake with %s", remoteAddr)
 	if err := session.Accept(); err != nil {
+		log.Error("inbound handshake failed with %s: %v", remoteAddr, err)
 		s.mu.Lock()
 		delete(s.pendingConns, remoteAddr)
 		s.mu.Unlock()
@@ -195,6 +215,8 @@ func (s *Server) handleInbound(conn net.Conn) {
 	session.onTerminate = s.createTerminateHandler(&identHash)
 	s.mu.Unlock()
 
+	log.Info("session established with %s (hash: %x...)", remoteAddr, identHash[:8])
+
 	// Notify callback
 	if s.onSession != nil {
 		s.onSession(session)
@@ -203,17 +225,22 @@ func (s *Server) handleInbound(conn net.Conn) {
 
 // Connect initiates an outbound connection.
 func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash data.Hash) (*Session, error) {
+	log.Debug("connecting to %s (hash: %x...)", address, remoteIdentHash[:8])
+
 	// Check if we already have a session
 	s.mu.RLock()
 	if existing, ok := s.sessions[remoteIdentHash]; ok {
 		s.mu.RUnlock()
+		log.Trace("reusing existing session for %x...", remoteIdentHash[:8])
 		return existing, nil
 	}
 	s.mu.RUnlock()
 
 	// Dial with timeout
+	log.Trace("dialing %s with timeout %v", address, ConnectTimeout)
 	conn, err := net.DialTimeout("tcp", address, ConnectTimeout)
 	if err != nil {
+		log.Error("dial failed to %s: %v", address, err)
 		return nil, err
 	}
 
@@ -226,7 +253,9 @@ func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash
 	}, false)
 
 	// Perform handshake
+	log.Trace("performing outbound handshake with %s", address)
 	if err := session.Connect(remoteStaticKey, remoteIdentHash); err != nil {
+		log.Error("outbound handshake failed with %s: %v", address, err)
 		conn.Close()
 		return nil, err
 	}
@@ -235,6 +264,8 @@ func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash
 	s.mu.Lock()
 	s.sessions[remoteIdentHash] = session
 	s.mu.Unlock()
+
+	log.Info("outbound session established to %s (hash: %x...)", address, remoteIdentHash[:8])
 
 	// Notify callback
 	if s.onSession != nil {

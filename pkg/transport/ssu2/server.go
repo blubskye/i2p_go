@@ -7,8 +7,11 @@ import (
 
 	"github.com/go-i2p/go-i2p/pkg/crypto"
 	"github.com/go-i2p/go-i2p/pkg/data"
+	"github.com/go-i2p/go-i2p/pkg/debug"
 	"github.com/go-i2p/go-i2p/pkg/i2np"
 )
+
+var log = debug.NewLogger(debug.SubSSU2)
 
 // Server manages SSU2 connections.
 type Server struct {
@@ -57,21 +60,27 @@ func NewServer(config *ServerConfig) *Server {
 
 // Start starts the SSU2 server.
 func (s *Server) Start() error {
+	defer log.FuncEntry()()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.running {
+		log.Debug("server already running")
 		return nil
 	}
 
 	// Start IPv4 listener
 	if s.localAddr != "" {
+		log.Info("starting IPv4 listener on %s", s.localAddr)
 		addr, err := net.ResolveUDPAddr("udp4", s.localAddr)
 		if err != nil {
+			log.Error("failed to resolve IPv4 address: %v", err)
 			return err
 		}
 		conn, err := net.ListenUDP("udp4", addr)
 		if err != nil {
+			log.Error("failed to start IPv4 listener: %v", err)
 			return err
 		}
 		s.conn = conn
@@ -80,8 +89,10 @@ func (s *Server) Start() error {
 
 	// Start IPv6 listener
 	if s.localAddr6 != "" {
+		log.Info("starting IPv6 listener on %s", s.localAddr6)
 		addr, err := net.ResolveUDPAddr("udp6", s.localAddr6)
 		if err != nil {
+			log.Error("failed to resolve IPv6 address: %v", err)
 			if s.conn != nil {
 				s.conn.Close()
 			}
@@ -89,6 +100,7 @@ func (s *Server) Start() error {
 		}
 		conn, err := net.ListenUDP("udp6", addr)
 		if err != nil {
+			log.Error("failed to start IPv6 listener: %v", err)
 			if s.conn != nil {
 				s.conn.Close()
 			}
@@ -99,6 +111,7 @@ func (s *Server) Start() error {
 	}
 
 	s.running = true
+	log.Info("SSU2 server started")
 
 	// Start maintenance routines
 	go s.maintenance()
@@ -108,9 +121,12 @@ func (s *Server) Start() error {
 
 // Stop stops the SSU2 server.
 func (s *Server) Stop() {
+	defer log.FuncEntry()()
+
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
+		log.Debug("server not running")
 		return
 	}
 	s.running = false
@@ -133,9 +149,11 @@ func (s *Server) Stop() {
 	}
 	s.mu.RUnlock()
 
+	log.Info("terminating %d sessions", len(sessions))
 	for _, session := range sessions {
 		session.Terminate(TermRouterShutdown)
 	}
+	log.Info("SSU2 server stopped")
 }
 
 // readLoop reads incoming packets.
@@ -174,14 +192,18 @@ func (s *Server) readLoop(conn *net.UDPConn) {
 // handlePacket handles an incoming packet.
 func (s *Server) handlePacket(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
 	if len(data) < ShortHeaderSize {
+		log.Trace("packet too short from %s: %d bytes", remoteAddr, len(data))
 		return
 	}
 
 	// Parse header to get connection ID
 	header, err := ParseHeader(data)
 	if err != nil {
+		log.Debug("failed to parse packet header from %s: %v", remoteAddr, err)
 		return
 	}
+
+	log.Trace("received packet type %d from %s, connID=%d", header.Type, remoteAddr, header.DestConnID)
 
 	// Find or create session
 	s.mu.RLock()
@@ -191,10 +213,12 @@ func (s *Server) handlePacket(conn *net.UDPConn, remoteAddr *net.UDPAddr, data [
 	if session == nil {
 		// Check if this is a SessionRequest
 		if header.Type == MsgSessionRequest {
+			log.Debug("new session request from %s", remoteAddr)
 			s.handleNewSession(conn, remoteAddr, data, header)
 			return
 		}
 		// Unknown session
+		log.Trace("unknown session connID=%d from %s", header.DestConnID, remoteAddr)
 		return
 	}
 
@@ -204,6 +228,8 @@ func (s *Server) handlePacket(conn *net.UDPConn, remoteAddr *net.UDPAddr, data [
 
 // handleNewSession handles a new incoming session.
 func (s *Server) handleNewSession(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte, header *Header) {
+	log.Trace("creating new session for %s", remoteAddr)
+
 	// Create new session
 	session, err := NewSession(&SessionConfig{
 		Conn:           conn,
@@ -214,6 +240,7 @@ func (s *Server) handleNewSession(conn *net.UDPConn, remoteAddr *net.UDPAddr, da
 		OnTerminate:    s.createTerminateHandler(header.DestConnID),
 	})
 	if err != nil {
+		log.Error("failed to create session for %s: %v", remoteAddr, err)
 		return
 	}
 
@@ -227,11 +254,14 @@ func (s *Server) handleNewSession(conn *net.UDPConn, remoteAddr *net.UDPAddr, da
 
 	// Process the SessionRequest
 	if err := session.handleSessionRequest(data); err != nil {
+		log.Error("session handshake failed with %s: %v", remoteAddr, err)
 		s.mu.Lock()
 		delete(s.sessions, session.localConnID)
 		s.mu.Unlock()
 		return
 	}
+
+	log.Info("session established with %s (localConnID=%d)", remoteAddr, session.localConnID)
 
 	// Notify callback
 	if s.onSession != nil {
@@ -241,9 +271,12 @@ func (s *Server) handleNewSession(conn *net.UDPConn, remoteAddr *net.UDPAddr, da
 
 // Connect initiates an outbound connection.
 func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash data.Hash) (*Session, error) {
+	log.Debug("connecting to %s (hash: %x...)", address, remoteIdentHash[:8])
+
 	// Resolve address
 	remoteAddr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
+		log.Error("failed to resolve address %s: %v", address, err)
 		return nil, err
 	}
 
@@ -256,6 +289,7 @@ func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash
 	}
 
 	if conn == nil {
+		log.Error("no UDP connection available for %s", address)
 		return nil, ErrSessionTerminated
 	}
 
@@ -269,6 +303,7 @@ func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash
 		OnTerminate:    s.createTerminateHandler(0), // Will be set after connect
 	})
 	if err != nil {
+		log.Error("failed to create session for %s: %v", address, err)
 		return nil, err
 	}
 
@@ -278,12 +313,16 @@ func (s *Server) Connect(address string, remoteStaticKey []byte, remoteIdentHash
 	s.mu.Unlock()
 
 	// Connect
+	log.Trace("performing outbound handshake with %s", address)
 	if err := session.Connect(remoteStaticKey, remoteIdentHash); err != nil {
+		log.Error("outbound handshake failed with %s: %v", address, err)
 		s.mu.Lock()
 		delete(s.sessions, session.localConnID)
 		s.mu.Unlock()
 		return nil, err
 	}
+
+	log.Info("outbound session established to %s (localConnID=%d)", address, session.localConnID)
 
 	// Notify callback
 	if s.onSession != nil {

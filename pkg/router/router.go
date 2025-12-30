@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-i2p/go-i2p/pkg/crypto"
 	"github.com/go-i2p/go-i2p/pkg/data"
+	"github.com/go-i2p/go-i2p/pkg/debug"
 	"github.com/go-i2p/go-i2p/pkg/garlic"
 	"github.com/go-i2p/go-i2p/pkg/i2np"
 	"github.com/go-i2p/go-i2p/pkg/netdb"
@@ -16,6 +17,8 @@ import (
 	"github.com/go-i2p/go-i2p/pkg/transport/ssu2"
 	"github.com/go-i2p/go-i2p/pkg/tunnel"
 )
+
+var log = debug.NewLogger(debug.SubRouter)
 
 // Router states
 const (
@@ -117,16 +120,24 @@ func (r *Router) initComponents() error {
 
 // Start starts the router.
 func (r *Router) Start() error {
+	defer log.FuncEntry()()
+
 	r.mu.Lock()
 	if r.state != RouterStateStopped {
 		r.mu.Unlock()
+		log.Warn("router already running")
 		return errors.New("router: already running")
 	}
 	r.state = RouterStateStarting
 	r.mu.Unlock()
 
+	identHash := r.context.IdentHash()
+	log.Info("starting router (identity: %x...)", identHash[:8])
+
 	// Start NetDb
+	log.Debug("starting NetDb")
 	if err := r.netDb.Start(); err != nil {
+		log.Error("failed to start NetDb: %v", err)
 		r.setState(RouterStateStopped)
 		return err
 	}
@@ -134,21 +145,32 @@ func (r *Router) Start() error {
 	// Reseed if needed
 	reseeder := netdb.NewReseeder(r.netDb)
 	if reseeder.NeedsReseed() {
-		_, _ = reseeder.Reseed()
+		log.Info("reseeding network database")
+		count, err := reseeder.Reseed()
+		if err != nil {
+			log.Warn("reseed failed: %v", err)
+		} else {
+			log.Info("reseeded %d router infos", count)
+		}
 	}
 
 	// Start transports
+	log.Debug("starting transports")
 	if err := r.startTransports(); err != nil {
+		log.Error("failed to start transports: %v", err)
 		r.netDb.Stop()
 		r.setState(RouterStateStopped)
 		return err
 	}
 
 	// Build and publish RouterInfo
+	log.Debug("publishing router info")
 	r.publishRouterInfo()
 
 	// Start tunnel manager
+	log.Debug("starting tunnel manager")
 	if err := r.tunnelManager.Start(); err != nil {
+		log.Error("failed to start tunnel manager: %v", err)
 		r.stopTransports()
 		r.netDb.Stop()
 		r.setState(RouterStateStopped)
@@ -156,6 +178,7 @@ func (r *Router) Start() error {
 	}
 
 	// Start garlic handler
+	log.Debug("starting garlic handler")
 	r.garlicHandler.Start()
 
 	// Start message processing
@@ -163,27 +186,38 @@ func (r *Router) Start() error {
 	go r.maintenanceLoop()
 
 	r.setState(RouterStateRunning)
+	log.Info("router started successfully")
 	return nil
 }
 
 // Stop stops the router.
 func (r *Router) Stop() {
+	defer log.FuncEntry()()
+
 	r.mu.Lock()
 	if r.state != RouterStateRunning {
 		r.mu.Unlock()
+		log.Debug("router not running")
 		return
 	}
 	r.state = RouterStateStopping
 	r.mu.Unlock()
 
+	log.Info("stopping router")
+
 	close(r.done)
 
+	log.Debug("stopping garlic handler")
 	r.garlicHandler.Stop()
+	log.Debug("stopping tunnel manager")
 	r.tunnelManager.Stop()
+	log.Debug("stopping transports")
 	r.stopTransports()
+	log.Debug("stopping NetDb")
 	r.netDb.Stop()
 
 	r.setState(RouterStateStopped)
+	log.Info("router stopped")
 }
 
 // startTransports starts NTCP2 and SSU2 servers.
@@ -347,14 +381,20 @@ func (r *Router) messageLoop() {
 func (r *Router) processMessage(rm *routerMessage) {
 	msg := rm.msg
 
+	log.Trace("processing message type %d (%d bytes)", msg.Type(), len(msg.Payload()))
+
 	switch msg.Type() {
 	case i2np.TypeDatabaseStore:
+		log.Trace("handling DatabaseStore")
 		ds, err := i2np.ParseDatabaseStore(msg.Payload())
 		if err == nil {
 			r.netDb.HandleDatabaseStore(ds)
+		} else {
+			log.Debug("failed to parse DatabaseStore: %v", err)
 		}
 
 	case i2np.TypeDatabaseLookup:
+		log.Trace("handling DatabaseLookup")
 		dl, err := i2np.ParseDatabaseLookup(msg.Payload())
 		if err == nil {
 			reply, _ := r.netDb.HandleDatabaseLookup(dl)
@@ -362,37 +402,56 @@ func (r *Router) processMessage(rm *routerMessage) {
 				// Send reply back
 				r.sendI2NPMessage(rm.from, reply.ToRawMessage())
 			}
+		} else {
+			log.Debug("failed to parse DatabaseLookup: %v", err)
 		}
 
 	case i2np.TypeDatabaseSearchReply:
+		log.Trace("handling DatabaseSearchReply")
 		dsr, err := i2np.ParseDatabaseSearchReply(msg.Payload())
 		if err == nil {
 			r.netDb.HandleDatabaseSearchReply(dsr)
+		} else {
+			log.Debug("failed to parse DatabaseSearchReply: %v", err)
 		}
 
 	case i2np.TypeTunnelData:
+		log.Trace("handling TunnelData")
 		td, err := i2np.ParseTunnelData(msg.Payload())
 		if err == nil {
 			r.tunnelManager.HandleTunnelData(tunnel.TunnelID(td.TunnelID), td.Data[:])
+		} else {
+			log.Debug("failed to parse TunnelData: %v", err)
 		}
 
 	case i2np.TypeVariableTunnelBuild:
+		log.Debug("handling VariableTunnelBuild")
 		vtb, err := i2np.ParseVariableTunnelBuild(msg.Payload())
 		if err == nil {
 			r.tunnelManager.HandleTunnelBuild(vtb)
+		} else {
+			log.Debug("failed to parse VariableTunnelBuild: %v", err)
 		}
 
 	case i2np.TypeVariableTunnelBuildReply:
+		log.Debug("handling VariableTunnelBuildReply")
 		vtbr, err := i2np.ParseVariableTunnelBuildReply(msg.Payload())
 		if err == nil {
 			r.tunnelManager.HandleTunnelBuildReply(vtbr)
+		} else {
+			log.Debug("failed to parse VariableTunnelBuildReply: %v", err)
 		}
 
 	case i2np.TypeGarlic:
+		log.Trace("handling Garlic message")
 		r.garlicHandler.HandleGarlicMessage(msg.Payload())
 
 	case i2np.TypeDeliveryStatus:
+		log.Trace("handling DeliveryStatus")
 		// Handle delivery confirmation
+
+	default:
+		log.Debug("unhandled message type: %d", msg.Type())
 	}
 
 	// Notify callback

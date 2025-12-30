@@ -5,8 +5,11 @@ import (
 	"time"
 
 	"github.com/go-i2p/go-i2p/pkg/data"
+	"github.com/go-i2p/go-i2p/pkg/debug"
 	"github.com/go-i2p/go-i2p/pkg/i2np"
 )
+
+var log = debug.NewLogger(debug.SubTunnel)
 
 // Manager coordinates all tunnel operations.
 type Manager struct {
@@ -56,20 +59,25 @@ func (m *Manager) SetPeerSelector(selector PeerSelector) {
 
 // Start starts the tunnel manager.
 func (m *Manager) Start() error {
+	defer log.FuncEntry()()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.running {
+		log.Debug("tunnel manager already running")
 		return nil
 	}
 
 	// Create exploratory pool
 	if m.peerSelector != nil {
+		log.Info("creating exploratory tunnel pool")
 		m.exploratoryPool = NewPool(ExploratoryPoolConfig(), m.builder, m.peerSelector)
 		m.exploratoryPool.Start()
 	}
 
 	m.running = true
+	log.Info("tunnel manager started")
 
 	// Start maintenance
 	go m.maintenance()
@@ -79,9 +87,12 @@ func (m *Manager) Start() error {
 
 // Stop stops the tunnel manager.
 func (m *Manager) Stop() {
+	defer log.FuncEntry()()
+
 	m.mu.Lock()
 	if !m.running {
 		m.mu.Unlock()
+		log.Debug("tunnel manager not running")
 		return
 	}
 	m.running = false
@@ -90,15 +101,20 @@ func (m *Manager) Stop() {
 
 	// Stop exploratory pool
 	if m.exploratoryPool != nil {
+		log.Debug("stopping exploratory pool")
 		m.exploratoryPool.Stop()
 	}
 
 	// Stop all client pools
 	m.mu.RLock()
-	for _, pool := range m.clientPools {
+	poolCount := len(m.clientPools)
+	for dest, pool := range m.clientPools {
+		log.Debug("stopping client pool for %x...", dest[:8])
 		pool.Stop()
 	}
 	m.mu.RUnlock()
+
+	log.Info("tunnel manager stopped (stopped %d client pools)", poolCount)
 }
 
 // CreateClientPool creates a tunnel pool for a client destination.
@@ -177,6 +193,8 @@ func (m *Manager) GetExploratoryOutbound() *OutboundTunnel {
 
 // HandleTunnelBuild handles an incoming tunnel build request.
 func (m *Manager) HandleTunnelBuild(msg *i2np.VariableTunnelBuild) error {
+	log.Trace("handling tunnel build request with %d records", len(msg.Records))
+
 	// Find which record is for us
 	for i, record := range msg.Records {
 		// Check if this record is for us (ToPeer matches our identity)
@@ -184,9 +202,12 @@ func (m *Manager) HandleTunnelBuild(msg *i2np.VariableTunnelBuild) error {
 			continue
 		}
 
+		log.Debug("processing build record %d (for us)", i)
+
 		// Decrypt and process the record
 		transit, replyRecord, err := m.processOurRecord(record)
 		if err != nil {
+			log.Warn("failed to process build record: %v", err)
 			// Create rejection reply
 			replyRecord = m.createRejectionReply(TunnelBuildReplyCritical)
 		}
@@ -199,6 +220,7 @@ func (m *Manager) HandleTunnelBuild(msg *i2np.VariableTunnelBuild) error {
 			m.mu.Lock()
 			m.transitTunnels[transit.receiveTunnelID] = transit
 			m.mu.Unlock()
+			log.Info("created transit tunnel ID=%d -> %d", transit.receiveTunnelID, transit.sendTunnelID)
 		}
 
 		// Forward to next hop or send reply
@@ -206,6 +228,7 @@ func (m *Manager) HandleTunnelBuild(msg *i2np.VariableTunnelBuild) error {
 	}
 
 	// No record for us, just forward
+	log.Trace("no build record for us, forwarding")
 	return m.forwardBuildMessage(msg, nil)
 }
 
@@ -286,14 +309,18 @@ func (m *Manager) HandleTunnelBuildReply(msg *i2np.VariableTunnelBuildReply) err
 
 // HandleTunnelData handles incoming tunnel data.
 func (m *Manager) HandleTunnelData(tunnelID TunnelID, data []byte) error {
+	log.Trace("handling tunnel data for ID=%d (%d bytes)", tunnelID, len(data))
+
 	m.mu.RLock()
 	transit, ok := m.transitTunnels[tunnelID]
 	m.mu.RUnlock()
 
 	if ok {
 		// Process as transit
+		log.Trace("forwarding as transit tunnel ID=%d -> %d", tunnelID, transit.sendTunnelID)
 		processed, err := transit.HandleData(data)
 		if err != nil {
+			log.Error("failed to process transit data: %v", err)
 			return err
 		}
 
@@ -308,6 +335,7 @@ func (m *Manager) HandleTunnelData(tunnelID TunnelID, data []byte) error {
 
 	// Check if it's for one of our inbound tunnels
 	// This would be handled by the pool that owns the tunnel
+	log.Trace("no transit tunnel found for ID=%d", tunnelID)
 	return nil
 }
 
