@@ -67,7 +67,12 @@ i2p_go/
 ## Building
 
 ```bash
-go build ./...
+# Clone the repository
+git clone https://github.com/blubskye/i2p_go.git
+cd i2p_go
+
+# Build the router binary
+go build -o i2p-router ./cmd/i2p-router
 ```
 
 ## Running
@@ -76,12 +81,34 @@ go build ./...
 # Start the router with defaults
 ./i2p-router
 
+# With debug logging
+./i2p-router -log debug
+
 # With custom addresses
 ./i2p-router -ntcp2 0.0.0.0:9001 -ssu2 0.0.0.0:9002
 
 # Enable floodfill mode
 ./i2p-router -floodfill
+
+# Custom data directory
+./i2p-router -data /path/to/data
+
+# Show all options
+./i2p-router -help
 ```
+
+Press `Ctrl+C` to stop the router.
+
+### Router Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-data` | `~/.i2p-go` | Data directory |
+| `-ntcp2` | `0.0.0.0:9001` | NTCP2 listen address |
+| `-ssu2` | `0.0.0.0:9001` | SSU2 listen address |
+| `-floodfill` | `false` | Enable floodfill mode |
+| `-bw-in` | `256` | Inbound bandwidth limit (KB/s) |
+| `-bw-out` | `256` | Outbound bandwidth limit (KB/s) |
 
 ## Configuration
 
