@@ -54,6 +54,7 @@ i2p_go/
 │   ├── router/              # Router core
 │   ├── sam/                 # SAMv3 API
 │   ├── addressbook/         # Address book system
+│   ├── debug/               # Debug/trace system
 │   └── services/
 │       ├── proxy/           # HTTP and SOCKS proxies
 │       ├── irc/             # IRC server
@@ -72,11 +73,14 @@ go build ./...
 ## Running
 
 ```bash
-# Start the router
-./i2p-router -config config.toml
-
-# Or with defaults
+# Start the router with defaults
 ./i2p-router
+
+# With custom addresses
+./i2p-router -ntcp2 0.0.0.0:9001 -ssu2 0.0.0.0:9002
+
+# Enable floodfill mode
+./i2p-router -floodfill
 ```
 
 ## Configuration
@@ -87,6 +91,69 @@ Default ports:
 - HTTP Proxy: 4444
 - SOCKS Proxy: 4447
 - SAM: 7656
+
+## Debugging & Tracing
+
+The router includes a comprehensive debug/trace system that can be toggled on and off.
+
+### Log Levels
+
+```bash
+./i2p-router -log trace    # Maximum verbosity (all messages)
+./i2p-router -log debug    # Debug messages and above
+./i2p-router -log info     # Normal operation (default)
+./i2p-router -log warn     # Warnings and errors only
+./i2p-router -log error    # Errors only
+./i2p-router -log off      # Disable logging
+```
+
+### Subsystem Filtering
+
+Filter logs to specific components:
+
+```bash
+# Only show NTCP2 and tunnel logs
+./i2p-router -log debug -log-subsystems ntcp2,tunnel
+
+# Available subsystems:
+# router, ntcp2, ssu2, tunnel, netdb, garlic, stream, sam, proxy, irc, eepsite, crypto
+```
+
+### File Logging
+
+```bash
+# Write logs to file
+./i2p-router -log debug -log-file router.log
+```
+
+### Stack Traces
+
+```bash
+# Enable stack traces for debug/trace messages
+./i2p-router -log debug -log-stack
+```
+
+### Other Options
+
+```bash
+# Disable colored output
+./i2p-router -log debug -no-color
+
+# Show periodic statistics
+./i2p-router -stats -stats-interval 30
+```
+
+### All Debug Flags
+
+| Flag | Description |
+|------|-------------|
+| `-log` | Log level: off, error, warn, info, debug, trace |
+| `-log-file` | Write logs to file instead of stderr |
+| `-log-subsystems` | Comma-separated list of subsystems to trace |
+| `-log-stack` | Show stack traces for debug/trace messages |
+| `-no-color` | Disable colored log output |
+| `-stats` | Show periodic router statistics |
+| `-stats-interval` | Statistics display interval in seconds (default: 30) |
 
 ## Dependencies
 
